@@ -1,0 +1,96 @@
+name: Sync upstream
+
+# Merge upstream (Wei-Shaw/sub2api) into the long-lived `milesians` branch.
+#
+# This fork maintains `milesians` as its own line: upstream arrives by merging
+# upstream/main into it, and `main` is kept as an untouched mirror of upstream.
+#
+# Scope: this workflow only performs merges that git can resolve on its own.
+# If the merge conflicts, the job fails and prints the local commands to finish
+# the merge by hand.
+#
+# Note: the push uses GITHUB_TOKEN, so the resulting commit does NOT trigger
+# other workflows (CI will not run on the sync merge commit).
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream ref to merge into milesians'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout milesians
+        uses: actions/checkout@v6
+        with:
+          ref: milesians
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          git remote add upstream https://github.com/Wei-Shaw/sub2api.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/Wei-Shaw/sub2api.git
+          # --no-tags: upstream tags are intentionally not mirrored into this fork,
+          # so that pushing tags here only ever publishes milesians releases.
+          git fetch --no-tags upstream "${UPSTREAM_REF}"
+
+      - name: Merge upstream into milesians
+        id: merge
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "milesians is already up to date with upstream/${UPSTREAM_REF}"
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BEHIND=$(git rev-list --count HEAD..FETCH_HEAD)
+          AHEAD=$(git rev-list --count FETCH_HEAD..HEAD)
+          echo "upstream/${UPSTREAM_REF} is ${BEHIND} commit(s) ahead, milesians has ${AHEAD} commit(s) not in upstream"
+
+          if git merge --no-edit FETCH_HEAD; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git merge --abort || true
+          echo "status=conflict" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Upstream merge conflict"
+            echo
+            echo "Merging \`upstream/${UPSTREAM_REF}\` into \`milesians\` conflicts, so nothing was pushed."
+            echo
+            echo "Resolve it locally, then push:"
+            echo
+            echo '```bash'
+            echo "git fetch upstream ${UPSTREAM_REF} --no-tags"
+            echo "git checkout milesians"
+            echo "git merge upstream/${UPSTREAM_REF}"
+            echo "# resolve conflicts, git add the files"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Push
+        if: steps.merge.outputs.status == 'merged'
+        run: git push origin HEAD:milesians
