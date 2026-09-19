@@ -23,6 +23,8 @@ import (
 )
 
 const (
+	// OpenAICodexTicketEnabledExtraKey is an account override; unset follows the global switch.
+	OpenAICodexTicketEnabledExtraKey = "codex_ticket_enabled"
 	openAICodexTicketExtraKeyPrefix  = "codex_turn_ticket:"
 	openAICodexAstraMinVersion       = "0.153.4"
 	openAICodexTicketStatePrefix     = "gAAAAA"
@@ -495,7 +497,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	probed := 0
 	for i := range accounts {
 		account := accounts[i]
-		if account.Status != StatusActive || !isOpenAICodexTicketAccount(&account) {
+		if !canHarvestOpenAICodexTicket(&account) {
 			continue
 		}
 		for _, model := range cfg.Models {
@@ -529,7 +531,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 // gAAAAA 前缀）就落库；否则记 Info miss，交给下个周期重试。同一 key 并发去重，避免上一发还没
 // 回来又叠一发。
 func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) {
-	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
+	if s == nil || !canHarvestOpenAICodexTicket(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
 		return
 	}
 	cfg := s.openAICodexTicketConfig()
@@ -660,7 +662,18 @@ func IsMaskedProxyURL(raw string) bool {
 // Credential shadows do not own tickets. Keep their existing forwarding policy
 // instead of imposing a gate for a key the harvester never populates.
 func isOpenAICodexTicketAccount(account *Account) bool {
-	return account != nil && account.IsOpenAIOAuthLike() && !account.IsShadow()
+	if account == nil || !account.IsOpenAIOAuthLike() || account.IsShadow() {
+		return false
+	}
+	enabled, configured := account.Extra[OpenAICodexTicketEnabledExtraKey].(bool)
+	return !configured || enabled
+}
+
+// Account scheduling restrictions also apply to synthetic harvest requests.
+// Keep this separate from the ticket gate: a missing ticket must not prevent
+// harvesting the ticket that will make the account usable again.
+func canHarvestOpenAICodexTicket(account *Account) bool {
+	return isOpenAICodexTicketAccount(account) && account.IsSchedulable()
 }
 
 // IsOpenAICodexTicketPrivateExtraKey also covers the retired account-level proxy

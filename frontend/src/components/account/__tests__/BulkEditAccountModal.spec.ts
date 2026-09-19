@@ -98,6 +98,31 @@ describe('BulkEditAccountModal', () => {
     } as any)
   })
 
+  it.each([true, false])('批量编辑显式提交 Codex 打票开关 %s', async (enabled) => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth', 'setup-token'] })
+    await wrapper.get('#bulk-codex-ticket-enabled').setValue(true)
+    if (!enabled) {
+      await wrapper.get('[data-testid="codex-ticket-toggle"]').trigger('click')
+    }
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
+      extra: { codex_ticket_enabled: enabled }
+    }))
+    wrapper.unmount()
+  })
+
+  it('未勾选批量修改打票开关时保持原值，混选 API Key 时隐藏开关', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-openai-codex-cli-only-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0]?.[1]?.extra).not.toHaveProperty('codex_ticket_enabled')
+    await wrapper.setProps({ selectedTypes: ['oauth', 'apikey'] })
+    expect(wrapper.find('[data-testid="codex-ticket-toggle"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('批量修改倍率时提示自动同步账号需要先关闭同步', async () => {
     const wrapper = mountModal()
 

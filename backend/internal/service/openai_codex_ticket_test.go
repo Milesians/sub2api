@@ -26,6 +26,8 @@ func ticketTestAccount(id int64) *Account {
 		ID:          id,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
 		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1"},
 	}
 }
@@ -37,6 +39,96 @@ func ticketTestService(t *testing.T, cfg config.OpenAICodexTicketConfig, upstrea
 			Gateway: config.GatewayConfig{OpenAICodexTicket: cfg},
 		},
 		httpUpstream: upstream,
+	}
+}
+
+func TestHarvestOpenAICodexTicket_RespectsAccountEligibility(t *testing.T) {
+	future, past := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Account)
+		want   int64
+	}{
+		{name: "default enabled", want: 1},
+		{name: "explicitly enabled", mutate: func(a *Account) { a.Extra = map[string]any{OpenAICodexTicketEnabledExtraKey: true} }, want: 1},
+		{name: "account disabled", mutate: func(a *Account) { a.Extra = map[string]any{OpenAICodexTicketEnabledExtraKey: false} }},
+		{name: "temporary cooldown", mutate: func(a *Account) { a.TempUnschedulableUntil = &future }},
+		{name: "expired cooldown", mutate: func(a *Account) { a.TempUnschedulableUntil = &past }, want: 1},
+		{name: "inactive", mutate: func(a *Account) { a.Status = "inactive" }},
+		{name: "manually paused", mutate: func(a *Account) { a.Schedulable = false }},
+		{name: "rate limited", mutate: func(a *Account) { a.RateLimitResetAt = &future }},
+		{name: "rate limit expired", mutate: func(a *Account) { a.RateLimitResetAt = &past }, want: 1},
+		{name: "overloaded", mutate: func(a *Account) { a.OverloadUntil = &future }},
+		{name: "overload expired", mutate: func(a *Account) { a.OverloadUntil = &past }, want: 1},
+		{name: "expired with auto pause", mutate: func(a *Account) { a.ExpiresAt = &past; a.AutoPauseOnExpired = true }},
+		{name: "expired without auto pause", mutate: func(a *Account) { a.ExpiresAt = &past }, want: 1},
+		{name: "not yet expired", mutate: func(a *Account) { a.ExpiresAt = &future; a.AutoPauseOnExpired = true }, want: 1},
+	} {
+		for _, entry := range []string{"scan", "probe"} {
+			t.Run(tc.name+"/"+entry, func(t *testing.T) {
+				account := ticketTestAccount(41)
+				if tc.mutate != nil {
+					tc.mutate(account)
+				}
+				var calls atomic.Int64
+				svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+					Enabled: true, FailClosed: true, Models: []string{"gpt-6-astra"},
+					HarvestProxyURL: "http://proxy.example.com:8080",
+				}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) {
+					calls.Add(1)
+					return codexTicketResponse(), nil
+				}})
+				repo := &codexTicketRefreshRepo{accounts: []Account{*account}}
+				svc.accountRepo = repo
+				if entry == "scan" {
+					svc.refreshOpenAICodexTickets(context.Background())
+				} else {
+					svc.probeOnceOpenAICodexTicket(context.Background(), account, "gpt-6-astra")
+				}
+				require.Equal(t, tc.want, calls.Load())
+				require.Len(t, repo.updates, int(tc.want))
+			})
+		}
+	}
+}
+
+func TestCodexTicketAccountSwitch_ControlsGateInjectionAndStatus(t *testing.T) {
+	for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken} {
+		t.Run(accountType, func(t *testing.T) {
+			cfg := config.OpenAICodexTicketConfig{Enabled: true, FailClosed: true, Models: []string{"gpt-6-astra"}}
+			svc := ticketTestService(t, cfg, nil)
+			account := ticketTestAccount(41)
+			account.Type = accountType
+			account.Extra = map[string]any{OpenAICodexTicketEnabledExtraKey: false}
+			headers := http.Header{}
+			headers.Set(openAICodexTurnStateHeader, "client-state")
+			require.False(t, svc.openAICodexTicketBlocksAccount(account, "gpt-6-astra"))
+			require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", headers))
+			require.Empty(t, OpenAICodexTicketStatuses(account, cfg, time.Now()))
+
+			account.Extra[OpenAICodexTicketEnabledExtraKey] = true
+			require.True(t, svc.openAICodexTicketBlocksAccount(account, "gpt-6-astra"))
+			require.ErrorIs(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", headers), ErrOpenAICodexTicketUnavailable)
+			require.True(t, OpenAICodexTicketStatuses(account, cfg, time.Now())[0].Blocked)
+
+			ticket := &openAICodexTicket{Model: "gpt-6-astra", State: fakeCodexTicketState(292), Length: 292, ExpiresAt: time.Now().Add(time.Hour)}
+			svc.storeOpenAICodexTicket(context.Background(), account, ticket)
+			account.Extra[openAICodexTicketExtraKey(ticket.Model)] = ticket
+			account.Extra[OpenAICodexTicketEnabledExtraKey] = false
+			require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, ticket.Model, headers))
+			require.Equal(t, "client-state", headers.Get(openAICodexTurnStateHeader), "disabled accounts must not inject a cached ticket")
+			require.Empty(t, OpenAICodexTicketStatuses(account, cfg, time.Now()))
+
+			account.Extra[OpenAICodexTicketEnabledExtraKey] = true
+			require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, ticket.Model, headers))
+			require.Equal(t, ticket.State, headers.Get(openAICodexTurnStateHeader))
+			require.True(t, OpenAICodexTicketStatuses(account, cfg, time.Now())[0].Ready)
+
+			svc.cfg.Gateway.OpenAICodexTicket.Enabled = false
+			headers.Set(openAICodexTurnStateHeader, "client-state")
+			require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, ticket.Model, headers))
+			require.Equal(t, "client-state", headers.Get(openAICodexTurnStateHeader), "account switch cannot override the global switch")
+		})
 	}
 }
 

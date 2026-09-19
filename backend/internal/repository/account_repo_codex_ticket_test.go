@@ -64,3 +64,14 @@ func TestCodexTicketExtraIsSchedulerNeutral(t *testing.T) {
 		"openai_passthrough":            true,
 	}))
 }
+
+func TestCodexTicketAccountSwitchReachesScheduler(t *testing.T) {
+	account := service.Account{ID: 41, Extra: map[string]any{
+		service.OpenAICodexTicketEnabledExtraKey: false,
+		"codex_turn_ticket:gpt-6-astra":          map[string]any{"state": "private"},
+	}}
+	metadata := buildSchedulerMetadataAccount(account)
+	require.Equal(t, false, metadata.Extra[service.OpenAICodexTicketEnabledExtraKey])
+	require.NotContains(t, metadata.Extra, "codex_turn_ticket:gpt-6-astra")
+	require.True(t, shouldEnqueueSchedulerOutboxForExtraUpdates(account.Extra))
+}

@@ -330,6 +330,34 @@ describe('EditAccountModal', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it.each(['oauth', 'setup-token'])('persists the Codex ticket switch for %s accounts', async (type) => {
+    const account = { ...buildOpenAIOAuthParentAccount(), type }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="codex-ticket-toggle"]')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    await toggle.trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_ticket_enabled).toBe(false)
+    wrapper.unmount()
+
+    const disabledAccount = { ...account, extra: { codex_ticket_enabled: false } }
+    const reopened = mountModal(disabledAccount)
+    expect(reopened.get('[data-testid="codex-ticket-toggle"]').attributes('aria-checked')).toBe('false')
+    await reopened.get('[data-testid="codex-ticket-toggle"]').trigger('click')
+    await reopened.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.codex_ticket_enabled).toBe(true)
+    reopened.unmount()
+  })
+
+  it('hides the Codex ticket switch for API keys and credential shadows', () => {
+    for (const account of [buildAccount(), buildOpenAISparkShadowAccount()]) {
+      const wrapper = mountModal(account)
+      expect(wrapper.find('[data-testid="codex-ticket-toggle"]').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2028-02-29T12:34:00'))

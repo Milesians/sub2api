@@ -19,6 +19,10 @@ func TestAccountResponseCodexTicketsUsesConfiguredPolicy(t *testing.T) {
 	require.False(t, status[0].Blocked)
 	h.cfg.Gateway.OpenAICodexTicket.FailClosed = true
 	require.True(t, h.accountResponseFromService(account).CodexTurnTickets[0].Blocked)
+	account.Extra = map[string]any{service.OpenAICodexTicketEnabledExtraKey: false}
+	require.Empty(t, h.accountResponseFromService(account).CodexTurnTickets)
+	require.Empty(t, h.accountListResponseFromService(account).CodexTurnTickets)
+	require.Equal(t, false, h.accountResponseFromService(account).Extra[service.OpenAICodexTicketEnabledExtraKey])
 }
 
 func TestAccountResponseCodexTicketsReadsLiveSettingsAfterRestart(t *testing.T) {
