@@ -215,8 +215,9 @@ def process(number):
         if not conflicts:
             merge.check_returncode()
         api(f'repos/{repo()}/issues/{number}/labels', {'labels': ['codex-review-required', 'codex-attempted']})
-        output('conflict_pr', number)
-        summary(f'PR #{number} has conflicts; one Codex attempt requested, followed by human review.')
+        if 'codex-attempted' not in labels:
+            output('conflict_pr', number)
+        summary(f'PR #{number} has conflicts; Codex runs at most once automatically, then human review is required.')
         return
     # No branch protection is assumed: wait for the actual PR checks explicitly.
     run('gh', 'pr', 'checks', str(number), '-R', repo(), '--watch', '--fail-fast', '--interval', '20')

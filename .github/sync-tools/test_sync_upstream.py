@@ -138,6 +138,9 @@ class UpstreamPRTest(unittest.TestCase):
         self.assertEqual((self.root / 'outputs').read_text(), 'conflict_pr=1\n')
         sync.process(1)
         self.assertEqual((self.root / 'outputs').read_text(), 'conflict_pr=1\n')
+        self.pr['labels'] = [label for label in self.pr['labels'] if label['name'] != 'codex-review-required']
+        sync.process(1)
+        self.assertEqual((self.root / 'outputs').read_text(), 'conflict_pr=1\n')
         self.assertEqual(self.git(self.work, 'status', '--porcelain'), '')
 
     def test_manual_merge_of_conflict_pr_publishes_after_review(self):
