@@ -1,0 +1,55 @@
+name: Process upstream PR
+
+on:
+  pull_request_target:
+    branches: [milesians]
+    types: [opened, reopened, synchronize, labeled, closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Upstream sync PR number'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: upstream-pr-${{ inputs.pr_number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  process:
+    if: >-
+      github.repository == 'Milesians/sub2api' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.event.pull_request.head.ref, 'sync/upstream-')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      conflict_pr: ${{ steps.process.outputs.conflict_pr }}
+    steps:
+      # Always run trusted automation from the base branch, never from the PR.
+      - uses: actions/checkout@v6
+        with:
+          ref: milesians
+          fetch-depth: 0
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
+      - name: Validate source, merge clean PRs, or hand conflicts to Codex
+        id: process
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        run: python3 .github/sync-tools/sync_upstream.py --mode pr --pr-number "$PR_NUMBER"
+
+  codex:
+    needs: process
+    if: needs.process.outputs.conflict_pr != ''
+    uses: ./.github/workflows/codex-upstream-conflict.yml
+    with:
+      pr_number: ${{ needs.process.outputs.conflict_pr }}
+    secrets: inherit

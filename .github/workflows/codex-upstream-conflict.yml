@@ -1,0 +1,205 @@
+name: Codex upstream conflict
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Sync PR number; leave empty to test Codex on an isolated conflict fixture'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: codex-upstream-${{ inputs.pr_number || 'connection-test' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: github.repository == 'Milesians/sub2api'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.prepare.outputs.pr_number }}
+      branch: ${{ steps.prepare.outputs.branch }}
+      head: ${{ steps.prepare.outputs.head }}
+      base: ${{ steps.prepare.outputs.base }}
+      resolved: ${{ steps.verify.outputs.resolved }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: milesians
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare a trusted sync PR or an isolated test fixture
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_URL: ${{ vars.CODEX_BASE_URL }}
+          MODEL: ${{ vars.CODEX_MODEL }}
+          EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os, pathlib, shutil, subprocess
+          spec = importlib.util.spec_from_file_location('sync', '.github/sync-tools/sync_upstream.py')
+          sync = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(sync)
+          assert os.environ['BASE_URL'].startswith('https://')
+          assert os.environ['MODEL'] and os.environ['EFFORT'], 'Codex variables are required'
+          endpoint = os.environ['BASE_URL'].rstrip('/')
+          if not endpoint.endswith('/responses'):
+              endpoint += '/responses'
+          sync.output('endpoint', endpoint)
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'codex-result').mkdir(exist_ok=True)
+          shutil.copyfile('.github/codex/resolve-upstream.md', os.environ['RUNNER_TEMP'] + '/codex-prompt.md')
+          number = os.environ['PR_NUMBER']
+          if number:
+              assert number.isdigit()
+              pr = sync.api(f'repos/{sync.repo()}/pulls/{number}')
+              assert sync.source_for(pr) and pr['state'] == 'open'
+              assert 'codex-review-required' in {label['name'] for label in pr['labels']}
+              head = pr['head']['sha']
+              sync.git('fetch', '--no-tags', 'origin', 'milesians', pr['head']['ref'])
+              base = sync.git('rev-parse', 'origin/milesians')
+              sync.git('checkout', '--detach', head)
+              sync.output('pr_number', number)
+              sync.output('branch', pr['head']['ref'])
+          else:
+              fixture = pathlib.Path(os.environ['RUNNER_TEMP']) / 'codex-conflict-fixture'
+              fixture.mkdir()
+              os.chdir(fixture)
+              sync.git('init', '-b', 'base')
+              sync.identity()
+              config = pathlib.Path('features.json')
+              config.write_text('{"features": []}\n')
+              sync.git('add', '.')
+              sync.git('commit', '-m', 'base fixture')
+              sync.git('checkout', '-b', 'fork')
+              config.write_text('{"features": ["fork"]}\n')
+              sync.git('commit', '-am', 'fork feature')
+              base = sync.git('rev-parse', 'HEAD')
+              sync.git('checkout', '-b', 'upstream', 'base')
+              config.write_text('{"features": ["upstream"]}\n')
+              sync.git('commit', '-am', 'upstream feature')
+              head = sync.git('rev-parse', 'HEAD')
+          sync.identity()
+          result = subprocess.run(['git', 'merge', '--no-ff', '--no-commit', base])
+          if result.returncode and not sync.git('diff', '--name-only', '--diff-filter=U'):
+              result.check_returncode()
+          sync.output('head', head)
+          sync.output('base', base)
+          sync.output('directory', str(pathlib.Path.cwd()))
+          PY
+      - name: Let Codex attempt the conflict resolution once
+        id: codex
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@f367b1e9572fd064ea71ef925ca24ee0f01080af # v1
+        with:
+          openai-api-key: ${{ secrets.CODEX_API_KEY }}
+          responses-api-endpoint: ${{ steps.prepare.outputs.endpoint }}
+          model: ${{ vars.CODEX_MODEL }}
+          effort: ${{ vars.CODEX_REASONING_EFFORT }}
+          working-directory: ${{ steps.prepare.outputs.directory }}
+          prompt-file: ${{ runner.temp }}/codex-prompt.md
+          output-file: ${{ runner.temp }}/codex-result/report.md
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          allow-bots: true
+      - name: Verify and export the proposed resolution
+        id: verify
+        if: steps.codex.outcome == 'success'
+        working-directory: ${{ steps.prepare.outputs.directory }}
+        env:
+          EXPECTED_HEAD: ${{ steps.prepare.outputs.head }}
+          EXPECTED_BASE: ${{ steps.prepare.outputs.base }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse MERGE_HEAD)" = "$EXPECTED_BASE"
+          git add -A
+          git diff --cached --check
+          if [ -z "$PR_NUMBER" ]; then
+            python3 -c 'import json; assert set(json.load(open("features.json"))["features"]) == {"fork", "upstream"}'
+          fi
+          mkdir -p "$RUNNER_TEMP/codex-result"
+          git diff --cached --binary > "$RUNNER_TEMP/codex-result/resolution.patch"
+          echo 'resolved=true' >> "$GITHUB_OUTPUT"
+      - name: Ensure the reviewer receives a result even if Codex fails
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/codex-result"
+          test -f "$RUNNER_TEMP/codex-result/report.md" || echo 'Codex 未生成报告，请查看运行日志。' > "$RUNNER_TEMP/codex-result/report.md"
+          printf '\nCodex: %s; resolution validation: %s\n' "$CODEX_OUTCOME" "$VERIFY_OUTCOME" >> "$RUNNER_TEMP/codex-result/report.md"
+          cat "$RUNNER_TEMP/codex-result/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.prepare.outcome == 'success'
+        with:
+          name: codex-upstream-${{ inputs.pr_number || 'connection-test' }}
+          path: ${{ runner.temp }}/codex-result/
+          retention-days: 7
+      - name: Fail the connectivity check if Codex did not resolve the fixture
+        if: always() && inputs.pr_number == '' && steps.verify.outputs.resolved != 'true'
+        run: exit 1
+
+  update-pr:
+    needs: resolve
+    if: always() && !cancelled() && needs.resolve.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Write credentials exist only in this fresh job, after Codex has stopped.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.head }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: codex-upstream-${{ inputs.pr_number }}
+          path: ${{ runner.temp }}/codex-result
+      - name: Submit a proposed merge commit and report to the existing PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          SOURCE_HEAD: ${{ needs.resolve.outputs.head }}
+          SOURCE_BASE: ${{ needs.resolve.outputs.base }}
+          BRANCH: ${{ needs.resolve.outputs.branch }}
+          RESOLVED: ${{ needs.resolve.outputs.resolved }}
+        run: |
+          current=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid,state --jq '.headRefOid + " " + .state')
+          if [ "$current" != "$SOURCE_HEAD OPEN" ]; then
+            echo 'PR changed while Codex was working; no changes pushed.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$RESOLVED" = true ]; then
+            git apply --index "$RUNNER_TEMP/codex-result/resolution.patch"
+            git diff --cached --check
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            tree=$(git write-tree)
+            commit=$(git commit-tree "$tree" -p "$SOURCE_HEAD" -p "$SOURCE_BASE" -m 'fix: propose Codex resolution of upstream merge conflicts')
+            git push origin "$commit:refs/heads/$BRANCH"
+          fi
+          {
+            echo 'Codex 已尝试处理一轮。请审查修改和 CI 结果后手工合并；本 PR 不会自动合并。'
+            echo
+            cat "$RUNNER_TEMP/codex-result/report.md"
+            echo
+            echo "运行记录：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/codex-pr-comment.md"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/codex-pr-comment.md"

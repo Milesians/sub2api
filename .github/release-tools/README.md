@@ -8,7 +8,7 @@ Go caches are isolated by target and refreshed on each source commit, with fallb
 
 All build jobs use the commit resolved by `prepare`. In `Milesians/sub2api`, application source and helper scripts always come from `milesians`, including manual releases; the selected tag supplies the version and must be contained in that branch. Other repositories continue building the selected tag. Helper scripts are passed as a run-local artifact. The workflow serializes release runs to prevent simultaneous updates to moving image tags.
 
-The fork checks upstream's published GitHub Releases every 30 minutes. For a newer stable release, it merges that release's tag (not upstream main) into `milesians` and creates a fork release tag to trigger image publication. A separate weekly main sync never creates release tags. Ordinary branch pushes do not release images. See [upstream sync](../SYNC_UPSTREAM.md).
+The fork checks upstream's published GitHub Releases every 30 minutes and opens a source-labelled PR for a newer stable release. A separate workflow merges clean sync PRs after checks pass; conflicting PRs receive one Codex attempt and require human review. Merging a release PR creates a matching fork version tag, publishes the image and copies upstream's release notes. Weekly main PRs never create release tags. Ordinary branch pushes do not release images. See [upstream sync](../SYNC_UPSTREAM.md).
 
 ## Validate without publication
 

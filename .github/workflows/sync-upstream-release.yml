@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  actions: write
 
 # Share the lock with the weekly main sync to avoid concurrent branch updates.
 concurrency:
@@ -27,7 +29,7 @@ jobs:
           fetch-depth: 0
           ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
 
-      - name: Merge the latest published release and trigger image publication
+      - name: Open a PR for the latest published upstream release
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/sync-tools/sync_upstream.py --mode release

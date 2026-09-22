@@ -294,6 +294,16 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Copy the upstream Release notes verbatim
+        if: ${{ env.DRY_RUN != 'true' && github.repository == 'Milesians/sub2api' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f ".github/upstream-releases/$RELEASE_TAG.json" ]; then
+            gh api "repos/Wei-Shaw/sub2api/releases/tags/$RELEASE_TAG" --jq '.body // ""' > "$RUNNER_TEMP/upstream-release-notes.md"
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/upstream-release-notes.md"
+          fi
+
       # Update DockerHub description
       - name: Update DockerHub description
         if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
