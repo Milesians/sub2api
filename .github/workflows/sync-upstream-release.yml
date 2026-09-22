@@ -1,14 +1,15 @@
-name: Sync upstream main
+name: Sync upstream release
 
 on:
   schedule:
-    # Sunday 19:23 UTC / 北京时间每周一 03:23.
-    - cron: '23 19 * * 0'
+    # Forks do not receive release events from upstream; poll published releases.
+    - cron: '17,47 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Share the lock with the weekly main sync to avoid concurrent branch updates.
 concurrency:
   group: sync-upstream-milesians
   cancel-in-progress: false
@@ -24,8 +25,9 @@ jobs:
         with:
           ref: milesians
           fetch-depth: 0
-          # A dedicated deploy key also permits syncing upstream workflow files.
           ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
 
-      - name: Merge upstream main without publishing
-        run: python3 .github/sync-tools/sync_upstream.py --mode main
+      - name: Merge the latest published release and trigger image publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/sync-tools/sync_upstream.py --mode release
