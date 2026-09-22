@@ -1,0 +1,62 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # UTC 01:23, 07:23, 13:23, 19:23 / 北京时间 09:23, 15:23, 21:23, 03:23.
+    - cron: '23 1,7,13,19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-milesians
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'Milesians/sub2api' && github.ref == 'refs/heads/milesians'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out milesians
+        uses: actions/checkout@v6
+        with:
+          ref: milesians
+          fetch-depth: 0
+          # A dedicated deploy key also permits syncing upstream workflow files.
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
+
+      - name: Merge upstream main and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git fetch --no-tags origin milesians
+          git merge --ff-only FETCH_HEAD
+          git fetch --no-tags https://github.com/Wei-Shaw/sub2api.git main
+          upstream_commit="$(git rev-parse FETCH_HEAD)"
+
+          if git merge-base --is-ancestor "$upstream_commit" HEAD; then
+            echo 'milesians already contains upstream main.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if ! git merge --no-edit "$upstream_commit"; then
+            {
+              echo 'Upstream merge failed. Resolve conflicts manually before the next sync.'
+              echo 'Conflicting files:'
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+            echo '::error::Could not merge upstream main into milesians.'
+            exit 1
+          fi
+
+          # A concurrent branch update must fail safely; never force-push.
+          git push origin HEAD:refs/heads/milesians
+          echo "Merged upstream main ($upstream_commit) into milesians." >> "$GITHUB_STEP_SUMMARY"
