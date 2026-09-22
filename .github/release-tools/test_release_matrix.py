@@ -139,6 +139,40 @@ class ReleaseMatrixTest(unittest.TestCase):
         self.assertEqual(output['owner_lower'], 'exampleowner')
         self.assertEqual(len(json.loads(output['matrix'])['include']), 5)
 
+    def test_branch_source_builds_fork_commit_instead_of_version_tag(self):
+        def git(*args):
+            return subprocess.check_output(['git', *args], text=True, stderr=subprocess.PIPE).strip()
+
+        git('init', '-q', '-b', 'milesians')
+        git('config', 'user.name', 'test')
+        git('config', 'user.email', 'test@example.com')
+        git('add', '.')
+        git('commit', '-qm', 'release base')
+        git('tag', 'v9.8.7')
+        Path('custom').write_text('fork change')
+        git('add', 'custom')
+        git('commit', '-qm', 'fork customization')
+        sha = git('rev-parse', 'HEAD')
+        git('update-ref', 'refs/remotes/origin/milesians', sha)
+        args = argparse.Namespace(ref='v9.8.7', source_branch='milesians', dry_run=False, simple=True)
+        with patch.dict(os.environ, {'GITHUB_OUTPUT': 'outputs'}):
+            release.plan(args)
+        output = dict(line.split('=', 1) for line in Path('outputs').read_text().splitlines())
+        self.assertEqual(output['sha'], sha)
+        self.assertEqual(output['tag'], 'v9.8.7')
+        self.assertNotEqual(output['sha'], git('rev-parse', 'v9.8.7'))
+
+        git('checkout', '-q', 'v9.8.7')
+        with self.assertRaisesRegex(ValueError, 'source branch'):
+            release.plan(args)
+
+    def test_branch_source_rejects_an_unmerged_release_tag(self):
+        args = argparse.Namespace(ref='v9.8.7', source_branch='milesians', dry_run=False, simple=True)
+        with patch.object(subprocess, 'check_output', side_effect=['a' * 40, 'a' * 40, 'b' * 40]), \
+                patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):
+            with self.assertRaisesRegex(ValueError, 'not contained'):
+                release.plan(args)
+
     def test_docker_commands_do_not_publish_during_dry_run(self):
         fake_bin = Path('bin')
         fake_bin.mkdir()

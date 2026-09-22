@@ -52,6 +52,12 @@ def sha256(path):
 
 def plan(args):
     sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    source_branch = getattr(args, 'source_branch', None)
+    if source_branch:
+        source_sha = subprocess.check_output(
+            ['git', 'rev-parse', '--verify', f'refs/remotes/origin/{source_branch}^{{commit}}'], text=True).strip()
+        if sha != source_sha:
+            raise ValueError('checkout does not match the selected source branch')
     if args.dry_run:
         version = VERSION_FILE.read_text().strip()
         tag = 'v' + version
@@ -61,7 +67,10 @@ def plan(args):
         if not tag.startswith('v') or not VERSION_RE.fullmatch(version):
             raise ValueError('publishing requires a v-prefixed release version tag')
         tagged_sha = subprocess.check_output(['git', 'rev-parse', '--verify', f'refs/tags/{tag}^{{commit}}'], text=True).strip()
-        if sha != tagged_sha:
+        if source_branch:
+            if subprocess.run(['git', 'merge-base', '--is-ancestor', tagged_sha, sha]).returncode != 0:
+                raise ValueError('release tag is not contained in the selected source branch')
+        elif sha != tagged_sha:
             raise ValueError('checkout does not match the selected release tag')
     if not VERSION_RE.fullmatch(version):
         raise ValueError('invalid VERSION')
@@ -159,6 +168,7 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     p = commands.add_parser('plan')
     p.add_argument('--ref', required=True)
+    p.add_argument('--source-branch', help='build this origin branch instead of the version tag')
     p.add_argument('--simple', action='store_true')
     p.add_argument('--dry-run', action='store_true')
     p.set_defaults(run=plan)

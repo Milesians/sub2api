@@ -27,36 +27,5 @@ jobs:
           # A dedicated deploy key also permits syncing upstream workflow files.
           ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
 
-      - name: Merge upstream main and push
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          git fetch --no-tags origin milesians
-          git merge --ff-only FETCH_HEAD
-          git fetch --no-tags https://github.com/Wei-Shaw/sub2api.git main
-          upstream_commit="$(git rev-parse FETCH_HEAD)"
-
-          if git merge-base --is-ancestor "$upstream_commit" HEAD; then
-            echo 'milesians already contains upstream main.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          if ! git merge --no-edit "$upstream_commit"; then
-            {
-              echo 'Upstream merge failed. Resolve conflicts manually before the next sync.'
-              echo 'Conflicting files:'
-              echo '```'
-              git diff --name-only --diff-filter=U
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            git merge --abort || true
-            echo '::error::Could not merge upstream main into milesians.'
-            exit 1
-          fi
-
-          # A concurrent branch update must fail safely; never force-push.
-          git push origin HEAD:refs/heads/milesians
-          echo "Merged upstream main ($upstream_commit) into milesians." >> "$GITHUB_STEP_SUMMARY"
+      - name: Merge upstream and tag new releases on milesians
+        run: python3 .github/sync-tools/sync_upstream.py

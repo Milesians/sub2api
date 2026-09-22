@@ -6,7 +6,9 @@ Each build uses GoReleaser OSS in snapshot mode with the selected release versio
 
 Go caches are isolated by target and refreshed on each source commit, with fallback to the preceding target cache. Save uses the original restore key, even if a build hook changes `go.sum`. Matrix jobs upload uniquely named artifacts. The publishing job extracts only the regular Linux binary from each verified archive and restores its executable permission before constructing Docker contexts. QEMU remains limited to runtime-image instructions. DockerHub images are omitted when its credentials are absent; GHCR is always retained. Simple mode still publishes only the amd64 GHCR image and the simple release description.
 
-All build jobs use the commit resolved by `prepare`, including a manual release's selected tag. Helper scripts come from the workflow revision and are passed as a run-local artifact, so older application tags do not need to contain the new scripts. The workflow serializes release runs to prevent simultaneous updates to moving image tags.
+All build jobs use the commit resolved by `prepare`. In `Milesians/sub2api`, application source and helper scripts always come from `milesians`, including manual releases; the selected tag supplies the version and must be contained in that branch. Other repositories continue building the selected tag. Helper scripts are passed as a run-local artifact. The workflow serializes release runs to prevent simultaneous updates to moving image tags.
+
+The fork's upstream sync creates a release tag on the merged `milesians` commit only when upstream has a newer stable version. Ordinary branch pushes do not release images. See [upstream sync](../SYNC_UPSTREAM.md).
 
 ## Validate without publication
 

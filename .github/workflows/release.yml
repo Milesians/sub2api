@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (or a branch/ref for dry run)'
+        description: 'Version tag to publish; this fork always builds milesians (dry run accepts a ref)'
         required: true
         type: string
       simple_release:
@@ -48,13 +48,13 @@ jobs:
       - name: Checkout workflow tooling
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.repository == 'Milesians/sub2api' && 'milesians' || github.sha }}
       - name: Preserve tooling for releases of older tags
         run: cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
       - name: Checkout selected application source
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.repository == 'Milesians/sub2api' && 'milesians' || inputs.tag || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
@@ -64,8 +64,10 @@ jobs:
         id: plan
         env:
           REQUESTED_REF: ${{ inputs.tag || github.ref_name }}
+          SOURCE_BRANCH: ${{ github.repository == 'Milesians/sub2api' && 'milesians' || '' }}
         run: |
           args=(--ref "$REQUESTED_REF")
+          if [[ -n "$SOURCE_BRANCH" ]]; then args+=(--source-branch "$SOURCE_BRANCH"); fi
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
