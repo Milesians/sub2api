@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Discover upstream sync PRs, then process them in a separate trusted workflow."""
+"""Discover upstream release PRs, then process them in a separate trusted workflow."""
 import argparse
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import time
 
 UPSTREAM = 'Wei-Shaw/sub2api'
 UPSTREAM_URL = f'https://github.com/{UPSTREAM}.git'
@@ -87,8 +88,7 @@ def release_info(tag='latest'):
 
 
 def branch_for(source):
-    suffix = source['tag'] if source['mode'] == 'release' else source['sha'][:12]
-    return f"sync/upstream-{source['mode']}-{suffix}"
+    return f"sync/upstream-release-{source['tag']}"
 
 
 def dispatch(number):
@@ -96,20 +96,15 @@ def dispatch(number):
         '-f', f'pr_number={number}')
 
 
-def discover(mode, upstream=UPSTREAM_URL):
-    release = release_info() if mode == 'release' else None
-    if mode == 'release' and (not release or covered(release['tag_name'])):
+def discover(upstream=UPSTREAM_URL):
+    release = release_info()
+    if not release or covered(release['tag_name']):
         summary('No new published upstream release; no PR or image build needed.')
         return
-    tag = release['tag_name'] if release else ''
-    git('fetch', '--no-tags', 'origin', 'milesians')
-    base = git('rev-parse', 'FETCH_HEAD')
-    git('fetch', '--no-tags', upstream, f'refs/tags/{tag}' if tag else 'refs/heads/main')
+    tag = release['tag_name']
+    git('fetch', '--no-tags', upstream, f'refs/tags/{tag}')
     sha = git('rev-parse', 'FETCH_HEAD^{commit}')
-    if mode == 'main' and ancestor(sha, base):
-        summary('milesians already contains upstream main.')
-        return
-    source = {'repository': UPSTREAM, 'mode': mode, 'tag': tag, 'sha': sha}
+    source = {'repository': UPSTREAM, 'mode': 'release', 'tag': tag, 'sha': sha}
     branch = branch_for(source)
     prs = json.loads(run('gh', 'pr', 'list', '-R', repo(), '--base', 'milesians', '--head', branch,
                          '--state', 'all', '--json', 'number,state'))
@@ -127,27 +122,26 @@ def discover(mode, upstream=UPSTREAM_URL):
     else:
         identity()
         git('checkout', '--detach', sha)
-        if release:
-            # A release needs a PR even if weekly main sync already brought its code.
-            # A unique receipt avoids an add/add conflict on the next release.
-            receipt = Path('.github/upstream-releases') / f'{tag}.json'
-            receipt.parent.mkdir(parents=True, exist_ok=True)
-            receipt.write_text(json.dumps(source, indent=2) + '\n')
-            git('add', str(receipt))
-            git('commit', '-m', f'chore: track upstream release {tag}')
+        # The receipt gives every release its own reviewable PR, and its commit (unlike
+        # upstream's "[skip ci]" VERSION commits) triggers CI when the deploy key pushes it.
+        # A unique file per release avoids an add/add conflict on the next release.
+        receipt = Path('.github/upstream-releases') / f'{tag}.json'
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps(source, indent=2) + '\n')
+        git('add', str(receipt))
+        git('commit', '-m', f'chore: track upstream release {tag}')
         git('push', 'origin', f'HEAD:refs/heads/{branch}')
     body = (f"Source: https://github.com/{UPSTREAM}\n\n"
-            f"Upstream {'release ' + tag if tag else 'main'}: `{sha}`\n\n"
+            f"Upstream release {tag}: `{sha}`\n\n"
             f"<!-- upstream-sync: {json.dumps(source)} -->\n\n"
             'Clean sync PRs are merged automatically after checks. Conflicts receive one Codex attempt '
-            'and then require human review.\n')
-    if release:
-        body += f"\n## Upstream release notes\n\n{(release.get('body') or '')[:50000]}\n"
+            'and then require human review.\n'
+            f"\n## Upstream release notes\n\n{(release.get('body') or '')[:50000]}\n")
     pr = api(f'repos/{repo()}/pulls', {
-        'title': f"Sync upstream {tag or 'main'} into milesians", 'head': branch,
+        'title': f"Sync upstream {tag} into milesians", 'head': branch,
         'base': 'milesians', 'body': body,
     })
-    api(f"repos/{repo()}/issues/{pr['number']}/labels", {'labels': ['upstream-sync', f'upstream-{mode}']})
+    api(f"repos/{repo()}/issues/{pr['number']}/labels", {'labels': ['upstream-sync', 'upstream-release']})
     # Explicit dispatch also works when the PR was created with GITHUB_TOKEN.
     dispatch(pr['number'])
     summary(f"Created sync PR #{pr['number']} from {UPSTREAM}.")
@@ -161,18 +155,29 @@ def source_for(pr):
             or pr['head']['repo']['full_name'] != repo()):
         return None
     source = json.loads(match.group(1))
-    if (source.get('repository') != UPSTREAM or source.get('mode') not in ('main', 'release')
+    if (source.get('repository') != UPSTREAM or source.get('mode') != 'release'
             or not re.fullmatch(r'[0-9a-f]{40}', source.get('sha', ''))):
         raise ValueError('Invalid upstream PR source')
-    if source['mode'] == 'release' and not VERSION.fullmatch(source.get('tag', '')):
+    if not VERSION.fullmatch(source.get('tag', '')):
         raise ValueError('Invalid upstream release version')
-    if pr['head']['ref'] != branch_for(source) or f"upstream-{source['mode']}" not in labels:
+    if pr['head']['ref'] != branch_for(source) or 'upstream-release' not in labels:
         raise ValueError('PR branch and source labels do not match')
     return source
 
 
+def wait_for_checks(head, attempts=20, interval=15):
+    # Pushed CI can take a moment to register; `gh pr checks` fails on "no checks reported".
+    # Require push-triggered runs: skipped pull_request_target jobs also leave check runs.
+    for _ in range(attempts):
+        if (api(f'repos/{repo()}/actions/runs?head_sha={head}&event=push&per_page=1')['total_count']
+                and api(f'repos/{repo()}/commits/{head}/check-runs?per_page=1')['total_count']):
+            return
+        time.sleep(interval)
+    raise ValueError(f'No CI checks appeared on {head}; refusing to merge unverified code')
+
+
 def publish_tag(source, commit):
-    if source['mode'] != 'release' or covered(source['tag']):
+    if covered(source['tag']):
         return
     release = release_info(source['tag'])
     if not release:
@@ -220,6 +225,7 @@ def process(number):
         summary(f'PR #{number} has conflicts; Codex runs at most once automatically, then human review is required.')
         return
     # No branch protection is assumed: wait for the actual PR checks explicitly.
+    wait_for_checks(head)
     run('gh', 'pr', 'checks', str(number), '-R', repo(), '--watch', '--fail-fast', '--interval', '20')
     # The PR may have changed while checks ran. Never merge an unverified head.
     current = api(f'repos/{repo()}/pulls/{number}')
@@ -234,7 +240,7 @@ def process(number):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=('main', 'release', 'pr'), required=True)
+    parser.add_argument('--mode', choices=('release', 'pr'), required=True)
     parser.add_argument('--upstream', default=UPSTREAM_URL)
     parser.add_argument('--pr-number', type=int)
     args = parser.parse_args()
@@ -243,4 +249,4 @@ if __name__ == '__main__':
             parser.error('--pr-number must be positive')
         process(args.pr_number)
     else:
-        discover(args.mode, args.upstream)
+        discover(args.upstream)
