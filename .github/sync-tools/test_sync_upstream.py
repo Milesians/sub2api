@@ -36,6 +36,7 @@ class UpstreamPRTest(unittest.TestCase):
         self.pr = None
         self.dispatched = []
         self.checks_pass = True
+        self.check_runs = 1
         self.close_during_checks = False
         self.fail_create = False
         self.addCleanup(patch.stopall)
@@ -43,8 +44,9 @@ class UpstreamPRTest(unittest.TestCase):
                                 'GITHUB_OUTPUT': str(self.root / 'outputs'),
                                 'GITHUB_STEP_SUMMARY': str(self.root / 'summary')}).start()
         patch.object(sync, 'api', side_effect=self.api).start()
-        self.release_api = patch.object(sync, 'release_info', side_effect=lambda tag='latest': self.release).start()
+        patch.object(sync, 'release_info', side_effect=lambda tag='latest': self.release).start()
         patch.object(sync, 'run', side_effect=self.command).start()
+        self.sleep = patch.object(sync.time, 'sleep').start()
 
     def git(self, directory, *args):
         return subprocess.check_output(['git', '-C', str(directory), *args], text=True,
@@ -91,6 +93,8 @@ class UpstreamPRTest(unittest.TestCase):
             names = {label['name'] for label in self.pr['labels']} | set(data['labels'])
             self.pr['labels'] = [{'name': name} for name in sorted(names)]
             return copy.deepcopy(self.pr['labels'])
+        if '/check-runs' in path or '/actions/runs?' in path:
+            return {'total_count': self.check_runs}
         if path.endswith('/pulls/1'):
             self.pr['head']['sha'] = self.git(self.origin, 'rev-parse', self.pr['head']['ref'])
             return copy.deepcopy(self.pr)
@@ -104,7 +108,7 @@ class UpstreamPRTest(unittest.TestCase):
         self.git(self.upstream, 'tag', '-a', 'v1.1.0', '-m', 'release')
         self.upstream_sha = self.git(self.upstream, 'rev-parse', 'HEAD')
         self.commit(self.upstream, 'unreleased', 'newer main change')
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
 
     def test_discovery_only_opens_marked_pr_without_merging_or_tagging(self):
         self.discover_release()
@@ -164,11 +168,11 @@ class UpstreamPRTest(unittest.TestCase):
     def test_duplicate_discovery_reuses_pr_and_closed_pr_is_respected(self):
         self.discover_release()
         source_head = self.git(self.origin, 'rev-parse', self.pr['head']['ref'])
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
         self.assertEqual(len(self.dispatched), 2)
         self.assertEqual(self.git(self.origin, 'rev-parse', self.pr['head']['ref']), source_head)
         self.pr['state'] = 'closed'
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
         self.assertEqual(len(self.dispatched), 2)
 
     def test_failed_pr_creation_recovers_without_rewriting_branch(self):
@@ -177,32 +181,22 @@ class UpstreamPRTest(unittest.TestCase):
             self.discover_release()
         old = self.git(self.origin, 'rev-parse', 'sync/upstream-release-v1.1.0')
         self.fail_create = False
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
         self.assertEqual(self.git(self.origin, 'rev-parse', self.pr['head']['ref']), old)
 
     def test_release_already_in_main_still_has_a_reviewable_pr(self):
         self.git(self.upstream, 'tag', 'v1.1.0')
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
         diff = self.git(self.work, 'diff', '--name-only', 'origin/milesians...HEAD')
         self.assertEqual(diff, '.github/upstream-releases/v1.1.0.json')
         sync.process(1)
         self.assertIn('v1.1.0', self.git(self.origin, 'tag', '-l'))
 
-    def test_main_pr_merges_without_creating_a_release(self):
-        self.commit(self.upstream, 'new', 'weekly main change')
-        sync.discover('main', str(self.upstream))
-        self.assertIn('upstream-main', {label['name'] for label in self.pr['labels']})
-        sync.process(1)
-        self.release_api.assert_not_called()
-        self.assertEqual(self.git(self.origin, 'show', 'milesians:new'), 'weekly main change')
-        self.assertEqual(self.git(self.origin, 'tag', '-l'), 'v1.0.0')
-
-    def test_no_main_changes_or_no_new_release_creates_nothing(self):
-        sync.discover('main', str(self.upstream))
+    def test_no_new_release_creates_nothing(self):
         self.release = None
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
         self.release = {'tag_name': 'v1.0.0'}
-        sync.discover('release', str(self.upstream))
+        sync.discover(str(self.upstream))
         self.assertIsNone(self.pr)
         self.assertFalse(self.dispatched)
 
@@ -219,6 +213,18 @@ class UpstreamPRTest(unittest.TestCase):
             sync.process(1)
         self.assertEqual(self.git(self.origin, 'rev-parse', 'milesians'), self.before)
 
+    def test_merge_waits_for_ci_to_register_and_refuses_without_checks(self):
+        self.discover_release()
+        self.check_runs = 0
+        with self.assertRaisesRegex(ValueError, 'No CI checks'):
+            sync.process(1)
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'milesians'), self.before)
+        self.assertEqual(self.sleep.call_count, 20)
+        self.git(self.work, 'merge', '--abort')
+        self.check_runs = 1
+        sync.process(1)
+        self.assertIn('v1.1.0', self.git(self.origin, 'tag', '-l'))
+
     def test_untrusted_pr_is_never_merged(self):
         self.discover_release()
         self.pr['user']['login'] = 'someone-else'
@@ -228,7 +234,7 @@ class UpstreamPRTest(unittest.TestCase):
 
     def test_source_branch_mismatch_is_rejected(self):
         self.discover_release()
-        self.pr['labels'] = [{'name': 'upstream-sync'}, {'name': 'upstream-main'}]
+        self.pr['labels'] = [{'name': 'upstream-sync'}]
         with self.assertRaisesRegex(ValueError, 'source labels'):
             sync.process(1)
 

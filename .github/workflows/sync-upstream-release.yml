@@ -11,7 +11,7 @@ permissions:
   pull-requests: write
   actions: write
 
-# Share the lock with the weekly main sync to avoid concurrent branch updates.
+# Serialize polls so overlapping runs never race on the sync branch.
 concurrency:
   group: sync-upstream-milesians
   cancel-in-progress: false

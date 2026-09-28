@@ -1,14 +1,14 @@
 # 上游同步 PR
 
-同步目标是 `Milesians/sub2api` 的 `milesians`。定时器只创建 PR，合并和发布由
-独立的 **Process upstream PR** 工作流处理：
+同步目标是 `Milesians/sub2api` 的 `milesians`，只同步上游正式 Release，不同步
+上游 main 上未发版的代码。定时器只创建 PR，合并和发布由独立的
+**Process upstream PR** 工作流处理：
 
 - **Sync upstream release**：每小时第 17、47 分钟检查 `Wei-Shaw/sub2api` 最新
   正式 GitHub Release。为新版本创建 `upstream-sync`、`upstream-release` 标记的
   PR，正文记录上游地址、版本、提交以及 Release 日志。
-- **Sync upstream main**：每周一北京时间 03:23 创建 `upstream-sync`、
-  `upstream-main` 标记的 PR。这类 PR 合并后不发布镜像。
-- **Process upstream PR**：验证 PR 来源，无冲突且 CI 通过后自动合并。
+- **Process upstream PR**：验证 PR 来源，等待 CI 检查出现并全部通过后，无冲突
+  的 PR 自动合并；CI 检查始终未出现时拒绝合并。
   Release PR 合并后，在 `milesians` 的合并提交上创建上游同名版本 tag，触发
   现有 Release 工作流。镜像版本沿用上游版本，GitHub Release 正文复制上游日志。
 
@@ -17,9 +17,13 @@ fork 不会直接收到上游 Release 事件，因此使用轮询，调度可能
 Release，不补发历史版本、不覆盖已有 tag。重复运行复用同一个 PR；手工关闭且
 未合并的 PR 不会被重新创建。
 
-Release PR 只引入对应 tag 的代码，不额外同步上游最新 main。已有的 fork 定制
-和之前每周合入的代码保留。每个版本附带 `.github/upstream-releases/<tag>.json`
-来源记录，保证版本代码即使已被每周同步带入，也有独立 PR 驱动该版本发布。
+Release PR 只引入对应 tag 的代码，不额外同步上游最新 main，已有的 fork 定制
+保留。每个版本附带 `.github/upstream-releases/<tag>.json` 来源记录：它让每个
+版本都有独立的 PR，而且这个新提交会触发 CI（上游发版后的 VERSION 提交带
+`[skip ci]`，直接用作 PR 头提交时不会产生任何检查）。
+
+手工合并冲突 PR 时请使用 **Create a merge commit**，不要 squash 或 rebase，
+否则会丢失上游提交历史，下一个版本会重复冲突。
 
 ## 冲突与 Codex
 
@@ -56,5 +60,5 @@ Actions 已允许创建 PR。工作流用 `GITHUB_TOKEN` 管理 PR，Deploy key 
 发现任务显式调度 PR 处理工作流，避免依赖机器人创建 PR 是否自动触发其他工作流。
 处理 PR 的代码总是从可信的 `milesians` 读取，不执行 PR 中的自动化脚本。
 
-两条定时工作流都支持手动运行。公开仓库连续 60 天无活动时，GitHub 可能停用
+定时工作流支持手动运行，调度延迟时可在 Actions 页面手动触发。公开仓库连续 60 天无活动时，GitHub 可能停用
 定时任务，需要在 Actions 页面重新启用。

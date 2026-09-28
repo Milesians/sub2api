@@ -16,6 +16,7 @@ permissions:
   pull-requests: write
   checks: read
   statuses: read
+  actions: read
 
 concurrency:
   group: upstream-pr-${{ inputs.pr_number || github.event.pull_request.number }}
